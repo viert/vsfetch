@@ -16,6 +16,7 @@ TBaseModel = TypeVar("TBaseModel", bound=BaseModel)
 
 
 def parse_vatsim_date_str(date_str: str) -> datetime:
+
     try:
         dt = datetime.strptime(date_str[:26], "%Y-%m-%dT%H:%M:%S.%f")
         return dt
@@ -67,6 +68,7 @@ class Controller(BaseModel):
     visual_range: int
     text_atis: Annotated[Optional[str], BeforeValidator(join_if_exists)] = None
     logon_time: str
+    human_readable: Optional[str] = None
 
 
 class AirportControllerSet(BaseModel):
@@ -89,6 +91,7 @@ class AirportControllerSet(BaseModel):
 
 class Airport(FixedAirport):
     controllers: AirportControllerSet = Field(default_factory=AirportControllerSet)
+    type: str = "airport"
 
     def versioned_object(self, version: int) -> "VersionedObject":
         return VersionedObject(
@@ -104,6 +107,7 @@ class Airport(FixedAirport):
 
 class FIR(FixedFIR):
     controller: Optional[Controller] = None
+    type: str = "fir"
 
     @property
     def is_empty(self) -> bool:
@@ -152,7 +156,8 @@ class Pilot(BaseModel):
     qnh_i_hg: float
     qnh_mb: int
     flight_plan: Optional[FlightPlan]
-    logon_time: str
+    logon_time: Annotated[int, BeforeValidator(parse_vatsim_date_str_ts_ms)]
+    type: str = "pilot"
 
     def track_object(self, ts: int) -> TrackObject:
         track_id = f"{self.callsign}.{self.cid}.{self.logon_time}"
@@ -250,12 +255,16 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
             match ctrl.facility:
                 case 2:
+                    ctrl.human_readable = f"{arpt.name} Delivery"
                     arpt.controllers.delivery = ctrl
                 case 3:
+                    ctrl.human_readable = f"{arpt.name} Ground"
                     arpt.controllers.ground = ctrl
                 case 4:
+                    ctrl.human_readable = f"{arpt.name} Tower"
                     arpt.controllers.tower = ctrl
                 case 5:
+                    ctrl.human_readable = f"{arpt.name} Approach"
                     arpt.controllers.approach = ctrl
             airports[arpt.icao] = arpt
         elif ctrl.facility == 6:
@@ -265,18 +274,29 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
                 continue
 
             fir = firs.get(f_fir.icao, FIR(**f_fir.model_dump()))
+            control_name = "Radar"
+
+            country = fixed_data.find_country_by_icao(fir.icao)
+            if country:
+                if country.custom_control_name:
+                    control_name = country.custom_control_name
+
+            ctrl.human_readable = f"{fir.name} {control_name}"
+
             fir.controller = ctrl
             firs[fir.icao] = fir
         else:
             continue
 
     for ctrl in atis:
+        ctrl.facility = 1
         f_arpt = fixed_data.find_airport_by_ctrl(ctrl)
         if f_arpt is None:
             log.debug("can't find airport by callsign %s", ctrl.callsign)
             continue
 
         arpt = airports.get(f_arpt.icao, Airport(**f_arpt.model_dump()))
+        ctrl.human_readable = f"{arpt.name} ATIS"
         arpt.controllers.atis = ctrl
         airports[arpt.icao] = arpt
 
@@ -325,6 +345,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
         url = f"{VERSIONED_BASE_URL}/api/v1/objects/"
         resp = requests.delete(url, json=req)
+        print(req)
         data = resp.json()
         t2 = time.time()
         log.debug(f"%s in %.3fs", data["status"], t2-t1)
@@ -364,10 +385,10 @@ def process(prev_version: Optional[int] = None) -> int:
         log.debug("previous data version is the same or fresher, skipping")
         return prev_version
 
-    # pilots = [Pilot(**pilot) for pilot in data["pilots"]]
-    #
-    # store_track(pilots, version)
-    # store_pilots(pilots, version)
+    pilots = [Pilot(**pilot) for pilot in data["pilots"]]
+
+    store_track(pilots, version)
+    store_pilots(pilots, version)
 
     ctrls = [Controller(**ctrl) for ctrl in data["controllers"]]
     atis = [Controller(**ctrl) for ctrl in data["atis"]]

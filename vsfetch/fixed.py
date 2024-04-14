@@ -238,6 +238,12 @@ class Data:
             if idx is not None:
                 return self._firs[idx]
 
+    def find_country_by_icao(self, icao: str) -> Optional[Country]:
+        idx = self._country_idx.get(icao[:2])
+        if idx:
+            return self._countries[idx]
+        return None
+
     def build_indexes(self):
         log.debug("building fixed data indexes")
         t1 = time.time()
