@@ -16,6 +16,10 @@ TBaseModel = TypeVar("TBaseModel", bound=BaseModel)
 
 
 def parse_vatsim_date_str(date_str: str) -> datetime:
+    if date_str.endswith("Z"):
+        date_str = date_str[:-1]
+    if len(date_str) < 26:
+        date_str += "0" * (26 - len(date_str))
 
     try:
         dt = datetime.strptime(date_str[:26], "%Y-%m-%dT%H:%M:%S.%f")
@@ -106,7 +110,7 @@ class Airport(FixedAirport):
 
 
 class FIR(FixedFIR):
-    controller: Optional[Controller] = None
+    controllers: Dict[str, Controller] = Field(default_factory=dict)
     type: str = "fir"
 
     @property
@@ -283,7 +287,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
             ctrl.human_readable = f"{fir.name} {control_name}"
 
-            fir.controller = ctrl
+            fir.controllers[ctrl.callsign] = ctrl
             firs[fir.icao] = fir
         else:
             continue
