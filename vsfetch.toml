@@ -1,0 +1,5 @@
+[tracked]
+base_url = "http://localhost:9441"
+
+[versioned]
+base_url = "http://localhost:9440"

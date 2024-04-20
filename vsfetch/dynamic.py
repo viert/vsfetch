@@ -5,12 +5,11 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from pydantic.functional_validators import BeforeValidator
 from vsfetch.log import log
+from vsfetch.config import get_config
 from vsfetch.fixed import Airport as FixedAirport, FIR as FixedFIR, data as fixed_data
 
 
 VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json"
-VERSIONED_BASE_URL = "http://localhost:9440"
-TRACKED_BASE_URL = "http://localhost:9441"
 
 TBaseModel = TypeVar("TBaseModel", bound=BaseModel)
 
@@ -18,9 +17,16 @@ TBaseModel = TypeVar("TBaseModel", bound=BaseModel)
 def parse_vatsim_date_str(date_str: str) -> datetime:
     if date_str.endswith("Z"):
         date_str = date_str[:-1]
+
+    if len(date_str) == 19:
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S")
+            return dt
+        except ValueError as e:
+            log.error(f"error parsing datetime %s: %s", date_str, e)
+
     if len(date_str) < 26:
         date_str += "0" * (26 - len(date_str))
-
     try:
         dt = datetime.strptime(date_str[:26], "%Y-%m-%dT%H:%M:%S.%f")
         return dt
@@ -193,10 +199,11 @@ class VersionedObject(BaseModel):
 
 
 def store_track(pilots: List[Pilot], version: int):
+    cfg = get_config()
     t1 = time.time()
     objects = [pilot.track_object(version).model_dump() for pilot in pilots]
     req = {"data": objects}
-    url = f"{TRACKED_BASE_URL}/api/v1/tracks/"
+    url = f"{cfg.tracked.base_url}/api/v1/tracks/"
     log.debug(f"storing track data to %s", url)
     resp = requests.post(url, json=req)
     data = resp.json()
@@ -205,12 +212,13 @@ def store_track(pilots: List[Pilot], version: int):
 
 
 def store_pilots(pilots: List[Pilot], version: int):
+    cfg = get_config()
     t1 = time.time()
     object_map = {
         f"pilot:{pilot.callsign}": pilot.versioned_object(version).model_dump(exclude_none=True) for pilot in pilots
     }
     req = {"data": object_map}
-    url = f"{VERSIONED_BASE_URL}/api/v1/objects/"
+    url = f"{cfg.versioned.base_url}/api/v1/objects/"
     log.debug(f"storing pilots data to %s", url)
     resp = requests.post(url, json=req)
     data = resp.json()
@@ -219,7 +227,7 @@ def store_pilots(pilots: List[Pilot], version: int):
 
     t1 = time.time()
     log.debug("collecting existing pilot keys from versioned db")
-    url = f"{VERSIONED_BASE_URL}/api/v1/keys/?prefix=pilot:"
+    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=pilot:"
     resp = requests.get(url)
     data = resp.json()
 
@@ -235,7 +243,7 @@ def store_pilots(pilots: List[Pilot], version: int):
             "version": version
         }
 
-        url = f"{VERSIONED_BASE_URL}/api/v1/objects/"
+        url = f"{cfg.versioned.base_url}/api/v1/objects/"
         resp = requests.delete(url, json=req)
         data = resp.json()
         t2 = time.time()
@@ -243,6 +251,7 @@ def store_pilots(pilots: List[Pilot], version: int):
 
 
 def store_controllers(ctrls: List[Controller], atis: List[Controller], version: int):
+    cfg = get_config()
 
     t1 = time.time()
     airports: Dict[str, Airport] = {}
@@ -312,7 +321,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         f"fir:{fir.icao}": fir.versioned_object(version).model_dump(exclude_none=True) for fir in firs.values()
     }
 
-    url = f"{VERSIONED_BASE_URL}/api/v1/objects/"
+    url = f"{cfg.versioned.base_url}/api/v1/objects/"
 
     req = {"data": airport_map}
     log.debug(f"storing airport data to %s", url)
@@ -331,7 +340,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
     t1 = time.time()
     log.debug("collecting existing airport keys from versioned db")
-    url = f"{VERSIONED_BASE_URL}/api/v1/keys/?prefix=airport:"
+    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=airport:"
     resp = requests.get(url)
     data = resp.json()
 
@@ -347,16 +356,15 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
             "version": version
         }
 
-        url = f"{VERSIONED_BASE_URL}/api/v1/objects/"
+        url = f"{cfg.versioned.base_url}/api/v1/objects/"
         resp = requests.delete(url, json=req)
-        print(req)
         data = resp.json()
         t2 = time.time()
         log.debug(f"%s in %.3fs", data["status"], t2-t1)
 
     t1 = time.time()
     log.debug("collecting existing fir keys from versioned db")
-    url = f"{VERSIONED_BASE_URL}/api/v1/keys/?prefix=fir:"
+    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=fir:"
     resp = requests.get(url)
     data = resp.json()
 
@@ -372,7 +380,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
             "version": version
         }
 
-        url = f"{VERSIONED_BASE_URL}/api/v1/objects/"
+        url = f"{cfg.versioned.base_url}/api/v1/objects/"
         resp = requests.delete(url, json=req)
         data = resp.json()
         t2 = time.time()
@@ -381,6 +389,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
 def process(prev_version: Optional[int] = None) -> int:
     log.debug("fetching data from %s", VATSIM_DATA_URL)
+
     resp = requests.get(VATSIM_DATA_URL)
     data = resp.json()
 
@@ -405,7 +414,13 @@ def process(prev_version: Optional[int] = None) -> int:
 def loop():
     version = None
     while True:
-        new_version = process(version)
+        try:
+            new_version = process(version)
+        except Exception as e:
+            log.error(f"error processing version {version}: {e}, sleeping for 10 seconds")
+            time.sleep(10)
+            continue
+
         if new_version == version:
             log.debug("no new data, sleeping for 3 seconds")
             time.sleep(3)
