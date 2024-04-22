@@ -2,6 +2,7 @@ import time
 import requests
 from typing import Optional, List, Annotated, Dict, TypeVar
 from datetime import datetime
+from dateutil.parser import parse
 from pydantic import BaseModel, Field
 from pydantic.functional_validators import BeforeValidator
 from vsfetch.log import log
@@ -15,25 +16,7 @@ TBaseModel = TypeVar("TBaseModel", bound=BaseModel)
 
 
 def parse_vatsim_date_str(date_str: str) -> datetime:
-    if date_str.endswith("Z"):
-        date_str = date_str[:-1]
-
-    if len(date_str) == 19:
-        try:
-            dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%S")
-            return dt
-        except ValueError as e:
-            log.error(f"error parsing datetime %s: %s", date_str, e)
-
-    if len(date_str) < 26:
-        date_str += "0" * (26 - len(date_str))
-    try:
-        dt = datetime.strptime(date_str[:26], "%Y-%m-%dT%H:%M:%S.%f")
-        return dt
-    except ValueError as e:
-        log.error(f"error parsing datetime %s: %s", date_str, e)
-        dt = datetime.strptime(date_str[:19], "%Y-%m-%dT%H:%M:%S")
-        return dt
+    return parse(date_str)
 
 
 def parse_vatsim_date_str_ts_ms(date_str: str) -> int:
@@ -206,6 +189,8 @@ def store_track(pilots: List[Pilot], version: int):
     url = f"{cfg.tracked.base_url}/api/v1/tracks/"
     log.debug(f"storing track data to %s", url)
     resp = requests.post(url, json=req)
+    if resp.status_code >= 300:
+        log.error(f"unsuccessful status code, response is {resp.text}")
     data = resp.json()
     t2 = time.time()
     log.info("track data stored in %.3fs status: %s", t2-t1, data["status"])
