@@ -270,7 +270,6 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
             arpt = airports.get(f_arpt.icao, Airport(**f_arpt.model_dump()))
             runways = find_airport_runways(arpt.icao)
             if runways:
-                print(runways)
                 runways = {k: Runway(**rwy.model_dump()) for k, rwy in runways.items()}
                 arpt.runways = runways
 
