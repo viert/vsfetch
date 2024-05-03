@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from pydantic.functional_validators import BeforeValidator
 from shapely.geometry import shape
 from vsfetch.log import log
+from vsfetch.config import get_config
 
 if TYPE_CHECKING:
     from .dynamic import Controller
@@ -37,7 +38,7 @@ def boundaries() -> Dict[str, Boundaries]:
     if _boundaries is None:
         log.debug("loading and parsing boundaries from %s", BOUNDARIES_DATA_URL)
         t1 = time.time()
-        resp = requests.get(BOUNDARIES_DATA_URL)
+        resp = requests.get(BOUNDARIES_DATA_URL, timeout=get_config().external.timeout)
         data = resp.json()
         bounds = {}
         for feature in data["features"]:
@@ -175,7 +176,7 @@ class Data:
     @classmethod
     def load(cls) -> Self:
         log.debug("loading fixed data from %s", FIXED_DATA_URL)
-        resp = requests.get(FIXED_DATA_URL)
+        resp = requests.get(FIXED_DATA_URL, timeout=get_config().external.timeout)
         data = resp.text
         return cls.parse(data)
 
@@ -279,4 +280,16 @@ class Data:
         log.debug("fixed data indexes built in %.3fs", t2 - t1)
 
 
-data = Data.load()
+_data: Optional[Data] = None
+
+
+def reload():
+    global _data
+    _data = Data.load()
+
+
+def get_data() -> Data:
+    global _data
+    if _data is None:
+        reload()
+    return _data

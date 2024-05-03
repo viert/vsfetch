@@ -7,7 +7,8 @@ from pydantic import BaseModel, Field
 from pydantic.functional_validators import BeforeValidator
 from vsfetch.log import log
 from vsfetch.config import get_config
-from vsfetch.fixed import Airport as FixedAirport, FIR as FixedFIR, data as fixed_data
+from vsfetch.fixed import Airport as FixedAirport, FIR as FixedFIR, get_data as get_fixed_data
+from vsfetch.ourairports import find_airport_runways
 
 
 VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json"
@@ -82,9 +83,26 @@ class AirportControllerSet(BaseModel):
         )
 
 
+class Runway(BaseModel):
+    length_ft: Optional[int]
+    width_ft: Optional[int]
+    surface: str
+    lighted: bool
+    closed: bool
+    ident: str
+    latitude_deg: Optional[float]
+    longitude_deg: Optional[float]
+    elevation_ft: Optional[int]
+    heading_degT: Optional[int]
+    displaced_threshold_ft: Optional[int]
+    active_to: bool = False
+    active_lnd: bool = False
+
+
 class Airport(FixedAirport):
     controllers: AirportControllerSet = Field(default_factory=AirportControllerSet)
     type: str = "airport"
+    runways: Dict[str, Runway] = Field(default_factory=dict)
 
     def versioned_object(self, version: int) -> "VersionedObject":
         return VersionedObject(
@@ -188,7 +206,7 @@ def store_track(pilots: List[Pilot], version: int):
     req = {"data": objects}
     url = f"{cfg.tracked.base_url}/api/v1/tracks/"
     log.debug(f"storing track data to %s", url)
-    resp = requests.post(url, json=req)
+    resp = requests.post(url, json=req, timeout=cfg.tracked.timeout)
     if resp.status_code >= 300:
         log.error(f"unsuccessful status code, response is {resp.text}")
     data = resp.json()
@@ -205,7 +223,7 @@ def store_pilots(pilots: List[Pilot], version: int):
     req = {"data": object_map}
     url = f"{cfg.versioned.base_url}/api/v1/objects/"
     log.debug(f"storing pilots data to %s", url)
-    resp = requests.post(url, json=req)
+    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
     data = resp.json()
     t2 = time.time()
     log.info("versioned pilots stored in %.3fs status: %s", t2-t1, data["status"])
@@ -213,7 +231,7 @@ def store_pilots(pilots: List[Pilot], version: int):
     t1 = time.time()
     log.debug("collecting existing pilot keys from versioned db")
     url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=pilot:"
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=cfg.versioned.timeout)
     data = resp.json()
 
     keys = set(data["keys"])
@@ -229,7 +247,7 @@ def store_pilots(pilots: List[Pilot], version: int):
         }
 
         url = f"{cfg.versioned.base_url}/api/v1/objects/"
-        resp = requests.delete(url, json=req)
+        resp = requests.delete(url, json=req, timeout=cfg.versioned.timeout)
         data = resp.json()
         t2 = time.time()
         log.debug(f"%s in %.3fs", data["status"], t2-t1)
@@ -244,12 +262,17 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
     for ctrl in ctrls:
         if 2 <= ctrl.facility <= 5:
-            f_arpt = fixed_data.find_airport_by_ctrl(ctrl)
+            f_arpt = get_fixed_data().find_airport_by_ctrl(ctrl)
             if f_arpt is None:
                 log.debug("can't find airport by callsign %s", ctrl.callsign)
                 continue
 
             arpt = airports.get(f_arpt.icao, Airport(**f_arpt.model_dump()))
+            runways = find_airport_runways(arpt.icao)
+            if runways:
+                print(runways)
+                runways = {k: Runway(**rwy.model_dump()) for k, rwy in runways.items()}
+                arpt.runways = runways
 
             match ctrl.facility:
                 case 2:
@@ -266,7 +289,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
                     arpt.controllers.approach = ctrl
             airports[arpt.icao] = arpt
         elif ctrl.facility == 6:
-            f_fir = fixed_data.find_fir_by_ctrl(ctrl)
+            f_fir = get_fixed_data().find_fir_by_ctrl(ctrl)
             if f_fir is None:
                 log.debug("can't find FIR by callsign %s", ctrl.callsign)
                 continue
@@ -274,7 +297,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
             fir = firs.get(f_fir.icao, FIR(**f_fir.model_dump()))
             control_name = "Radar"
 
-            country = fixed_data.find_country_by_icao(fir.icao)
+            country = get_fixed_data().find_country_by_icao(fir.icao)
             if country:
                 if country.custom_control_name:
                     control_name = country.custom_control_name
@@ -288,7 +311,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
     for ctrl in atis:
         ctrl.facility = 1
-        f_arpt = fixed_data.find_airport_by_ctrl(ctrl)
+        f_arpt = get_fixed_data().find_airport_by_ctrl(ctrl)
         if f_arpt is None:
             log.debug("can't find airport by callsign %s", ctrl.callsign)
             continue
@@ -310,12 +333,12 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
     req = {"data": airport_map}
     log.debug(f"storing airport data to %s", url)
-    resp = requests.post(url, json=req)
+    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
     airport_data = resp.json()
 
     req = {"data": fir_map}
     log.debug(f"storing fir data to %s", url)
-    resp = requests.post(url, json=req)
+    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
     fir_data = resp.json()
     t2 = time.time()
 
@@ -326,7 +349,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
     t1 = time.time()
     log.debug("collecting existing airport keys from versioned db")
     url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=airport:"
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=cfg.versioned.timeout)
     data = resp.json()
 
     keys = set(data["keys"])
@@ -342,7 +365,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         }
 
         url = f"{cfg.versioned.base_url}/api/v1/objects/"
-        resp = requests.delete(url, json=req)
+        resp = requests.delete(url, json=req, timeout=cfg.versioned.timeout)
         data = resp.json()
         t2 = time.time()
         log.debug(f"%s in %.3fs", data["status"], t2-t1)
@@ -350,7 +373,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
     t1 = time.time()
     log.debug("collecting existing fir keys from versioned db")
     url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=fir:"
-    resp = requests.get(url)
+    resp = requests.get(url, timeout=cfg.versioned.timeout)
     data = resp.json()
 
     keys = set(data["keys"])
@@ -366,7 +389,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         }
 
         url = f"{cfg.versioned.base_url}/api/v1/objects/"
-        resp = requests.delete(url, json=req)
+        resp = requests.delete(url, json=req, timeout=cfg.versioned.timeout)
         data = resp.json()
         t2 = time.time()
         log.debug(f"%s in %.3fs", data["status"], t2-t1)
@@ -375,7 +398,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 def process(prev_version: Optional[int] = None) -> int:
     log.debug("fetching data from %s", VATSIM_DATA_URL)
 
-    resp = requests.get(VATSIM_DATA_URL)
+    resp = requests.get(VATSIM_DATA_URL, timeout=get_config().external.timeout)
     data = resp.json()
 
     version = parse_vatsim_date_str_ts_ms(data["general"]["update_timestamp"])

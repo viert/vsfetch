@@ -1,5 +1,10 @@
 [tracked]
 base_url = "http://localhost:9441"
+timeout = 3.0
 
 [versioned]
 base_url = "http://localhost:9440"
+timeout = 3.0
+
+[external]
+timeout = 3.0
