@@ -25,8 +25,11 @@ def parse_vatsim_date_str_ts_ms(date_str: str) -> int:
     return round(dt.timestamp() * 1000)
 
 
-def join_if_exists(data: Optional[List[str]]) -> Optional[str]:
-    return "\n".join(data) if data else None
+def join_if_exists(data: Optional[List[str] | str]) -> Optional[str]:
+    if isinstance(data, list):
+        return "\n".join(data)
+    else:
+        return data
 
 
 class TrackPoint(BaseModel):
