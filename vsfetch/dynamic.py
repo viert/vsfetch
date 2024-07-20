@@ -1,6 +1,6 @@
 import time
 import requests
-from typing import Optional, List, Annotated, Dict, TypeVar
+from typing import Optional, List, Annotated, Dict, Set, TypeVar
 from datetime import datetime
 from dateutil.parser import parse
 from pydantic import BaseModel, Field
@@ -65,6 +65,16 @@ class Controller(BaseModel):
     human_readable: Optional[str] = None
 
 
+class StoredController(Controller):
+    position: VersionedPoint
+
+    def versioned_object(self, version: int) -> "VersionedObject":
+        return VersionedObject(
+            data=self,
+            version=version
+        )
+
+
 class AirportControllerSet(BaseModel):
     atis: Optional[Controller] = None
     delivery: Optional[Controller] = None
@@ -107,7 +117,6 @@ class Airport(FixedAirport):
     def versioned_object(self, version: int) -> "VersionedObject":
         return VersionedObject(
             data=self,
-            point=VersionedPoint(lat=self.latitude, lng=self.longitude),
             version=version
         )
 
@@ -127,10 +136,6 @@ class FIR(FixedFIR):
     def versioned_object(self, version: int) -> "VersionedObject":
         return VersionedObject(
             data=self,
-            rect=VersionedRect(
-                min=VersionedPoint(lng=self.boundaries.bbox.min.lng, lat=self.boundaries.bbox.min.lat),
-                max=VersionedPoint(lng=self.boundaries.bbox.max.lng, lat=self.boundaries.bbox.max.lat),
-            ),
             version=version
         )
 
@@ -227,15 +232,18 @@ def store_pilots(pilots: List[Pilot], version: int):
     data = resp.json()
     t2 = time.time()
     log.info("versioned pilots stored in %.3fs status: %s", t2-t1, data["status"])
+    delete_old_keys("pilot:", set(object_map.keys()), version)
 
+
+def delete_old_keys(prefix: str, new_keys: Set[str], version: int):
+    cfg = get_config()
     t1 = time.time()
-    log.debug("collecting existing pilot keys from versioned db")
-    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=pilot:"
+    log.debug("collecting existing keys with prefix \"%s\" from versioned db", prefix)
+    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix={prefix}"
     resp = requests.get(url, timeout=cfg.versioned.timeout)
     data = resp.json()
 
     keys = set(data["keys"])
-    new_keys = set(object_map.keys())
     keys_to_remove = keys.difference(new_keys)
 
     log.debug("keys in db %d, number of keys to remove %d", len(keys), len(keys_to_remove))
@@ -259,6 +267,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
     t1 = time.time()
     airports: Dict[str, Airport] = {}
     firs: Dict[str, FIR] = {}
+    pure_ctrls: Dict[str, StoredController] = {}
 
     for ctrl in ctrls:
         if 2 <= ctrl.facility <= 5:
@@ -287,6 +296,13 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
                     ctrl.human_readable = f"{arpt.name} Approach"
                     arpt.controllers.approach = ctrl
             airports[arpt.icao] = arpt
+
+            stored_ctrl = {
+                **ctrl.model_dump(),
+                "position": VersionedPoint(lat=arpt.latitude, lng=arpt.longitude)
+            }
+            pure_ctrls[ctrl.callsign] = StoredController(**stored_ctrl)
+
         elif ctrl.facility == 6:
             f_fir = get_fixed_data().find_fir_by_ctrl(ctrl)
             if f_fir is None:
@@ -305,6 +321,11 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
             fir.controllers[ctrl.callsign] = ctrl
             firs[fir.icao] = fir
+            stored_ctrl = {
+                **ctrl.model_dump(),
+                "position": VersionedPoint(lat=fir.boundaries.center.lat, lng=fir.boundaries.center.lng)
+            }
+            pure_ctrls[ctrl.callsign] = StoredController(**stored_ctrl)
         else:
             continue
 
@@ -319,79 +340,53 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         ctrl.human_readable = f"{arpt.name} ATIS"
         arpt.controllers.atis = ctrl
         airports[arpt.icao] = arpt
+        stored_ctrl = {
+            **ctrl.model_dump(),
+            "position": VersionedPoint(lat=arpt.latitude, lng=arpt.longitude)
+        }
+        pure_ctrls[ctrl.callsign] = StoredController(**stored_ctrl)
 
     airport_map = {
-        f"airport:{arpt.icao}": arpt.versioned_object(version).model_dump(exclude_none=True) for arpt in airports.values()
+        f"airport:{arpt.icao}": arpt.versioned_object(version).model_dump(exclude_none=True)
+        for arpt in airports.values()
     }
 
     fir_map = {
-        f"fir:{fir.icao}": fir.versioned_object(version).model_dump(exclude_none=True) for fir in firs.values()
+        f"fir:{fir.icao}": fir.versioned_object(version).model_dump(exclude_none=True)
+        for fir in firs.values()
+    }
+
+    pure_ctrl_map = {
+        f"ctrl:{ctrl.callsign}": ctrl.versioned_object(version).model_dump(exclude_none=True)
+        for ctrl in pure_ctrls.values()
     }
 
     url = f"{cfg.versioned.base_url}/api/v1/objects/"
 
     req = {"data": airport_map}
-    log.debug(f"storing airport data to %s", url)
+    log.debug("storing airport data to %s", url)
     resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
     airport_data = resp.json()
 
     req = {"data": fir_map}
-    log.debug(f"storing fir data to %s", url)
+    log.debug("storing fir data to %s", url)
     resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
     fir_data = resp.json()
+
+    req = {"data": pure_ctrl_map}
+    log.debug("storing pure controllers to %s", url)
+    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
+    ctrl_data = resp.json()
     t2 = time.time()
 
     log.info("versioned airports stored in %.3fs", t2-t1)
     log.debug("airport store status: %s", airport_data["status"])
     log.debug("fir store status: %s", fir_data["status"])
+    log.debug("pure ctrl store status: %s", ctrl_data["status"])
 
-    t1 = time.time()
-    log.debug("collecting existing airport keys from versioned db")
-    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=airport:"
-    resp = requests.get(url, timeout=cfg.versioned.timeout)
-    data = resp.json()
-
-    keys = set(data["keys"])
-    new_keys = set(airport_map.keys())
-    keys_to_remove = keys.difference(new_keys)
-
-    log.debug("keys in db %d, number of keys to remove %d", len(keys), len(keys_to_remove))
-
-    if keys_to_remove:
-        req = {
-            "data": [{"key": key} for key in keys_to_remove],
-            "version": version
-        }
-
-        url = f"{cfg.versioned.base_url}/api/v1/objects/"
-        resp = requests.delete(url, json=req, timeout=cfg.versioned.timeout)
-        data = resp.json()
-        t2 = time.time()
-        log.debug(f"%s in %.3fs", data["status"], t2-t1)
-
-    t1 = time.time()
-    log.debug("collecting existing fir keys from versioned db")
-    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix=fir:"
-    resp = requests.get(url, timeout=cfg.versioned.timeout)
-    data = resp.json()
-
-    keys = set(data["keys"])
-    new_keys = set(fir_map.keys())
-    keys_to_remove = keys.difference(new_keys)
-
-    log.debug("keys in db %d, number of keys to remove %d", len(keys), len(keys_to_remove))
-
-    if keys_to_remove:
-        req = {
-            "data": [{"key": key} for key in keys_to_remove],
-            "version": version
-        }
-
-        url = f"{cfg.versioned.base_url}/api/v1/objects/"
-        resp = requests.delete(url, json=req, timeout=cfg.versioned.timeout)
-        data = resp.json()
-        t2 = time.time()
-        log.debug(f"%s in %.3fs", data["status"], t2-t1)
+    delete_old_keys("airport:", set(airport_map.keys()), version)
+    delete_old_keys("fir:", set(fir_map.keys()), version)
+    delete_old_keys("ctrl:", set(pure_ctrl_map.keys()), version)
 
 
 def process(prev_version: Optional[int] = None) -> int:

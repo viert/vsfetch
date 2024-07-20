@@ -2,6 +2,8 @@ import time
 import requests
 from typing import Self, Optional, List, Dict, DefaultDict, Annotated, TYPE_CHECKING, Any
 from collections import defaultdict
+
+import shapely
 from pydantic import BaseModel
 from pydantic.functional_validators import BeforeValidator
 from shapely.geometry import shape
@@ -28,6 +30,7 @@ class BoundingBox(BaseModel):
 class Boundaries(BaseModel):
     geometry: Dict[str, Any]
     bbox: BoundingBox
+    center: Point
 
 
 _boundaries: Optional[Dict[str, Boundaries]] = None
@@ -44,12 +47,14 @@ def boundaries() -> Dict[str, Boundaries]:
         for feature in data["features"]:
             icao = feature["properties"]["id"]
             s = shape(feature["geometry"])
+            center = shapely.centroid(s)
             bounds[icao] = Boundaries(
                 geometry=feature["geometry"],
                 bbox=BoundingBox(
                     min=Point(lng=s.bounds[0], lat=s.bounds[1]),
                     max=Point(lng=s.bounds[2], lat=s.bounds[3]),
-                )
+                ),
+                center=Point(lng=center.x, lat=center.y)
             )
         _boundaries = bounds
         t2 = time.time()
