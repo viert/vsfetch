@@ -1,15 +1,12 @@
 import time
 import requests
+import shapely
 from typing import Self, Optional, List, Dict, DefaultDict, Annotated, TYPE_CHECKING, Any
 from collections import defaultdict
-
-import shapely
 from pydantic import BaseModel
 from pydantic.functional_validators import BeforeValidator
 from shapely.geometry import shape
-from vsfetch.log import log
-from vsfetch.config import get_config
-
+from .ctx import ctx
 if TYPE_CHECKING:
     from .dynamic import Controller
 
@@ -39,9 +36,9 @@ _boundaries: Optional[Dict[str, Boundaries]] = None
 def boundaries() -> Dict[str, Boundaries]:
     global _boundaries
     if _boundaries is None:
-        log.debug("loading and parsing boundaries from %s", BOUNDARIES_DATA_URL)
+        ctx.log.debug("loading and parsing boundaries from %s", BOUNDARIES_DATA_URL)
         t1 = time.time()
-        resp = requests.get(BOUNDARIES_DATA_URL, timeout=get_config().external.timeout)
+        resp = requests.get(BOUNDARIES_DATA_URL, timeout=ctx.cfg.external.timeout)
         data = resp.json()
         bounds = {}
         for feature in data["features"]:
@@ -58,7 +55,7 @@ def boundaries() -> Dict[str, Boundaries]:
             )
         _boundaries = bounds
         t2 = time.time()
-        log.debug("boundaries parsed in %.3fs", t2 - t1)
+        ctx.log.debug("boundaries parsed in %.3fs", t2 - t1)
     return _boundaries
 
 
@@ -123,7 +120,7 @@ class FIR(BaseModel):
         bds = boundaries().get(tokens[3], boundaries().get(tokens[0]))
 
         if bds is None:
-            log.error(f"can't find boundaries for fir {tokens[0]} {tokens[2]}")
+            ctx.log.error(f"can't find boundaries for fir {tokens[0]} {tokens[2]}")
 
         return cls(
             icao=tokens[0],
@@ -180,15 +177,15 @@ class Data:
 
     @classmethod
     def load(cls) -> Self:
-        log.debug("loading fixed data from %s", FIXED_DATA_URL)
-        resp = requests.get(FIXED_DATA_URL, timeout=get_config().external.timeout)
+        ctx.log.debug("loading fixed data from %s", FIXED_DATA_URL)
+        resp = requests.get(FIXED_DATA_URL, timeout=ctx.cfg.external.timeout)
         data = resp.text
         return cls.parse(data)
 
     @classmethod
     def parse(cls, text: str) -> Self:
         t1 = time.time()
-        log.debug("parsing fixed data")
+        ctx.log.debug("parsing fixed data")
         c_section = None
 
         countries = []
@@ -216,7 +213,7 @@ class Data:
                     uirs.append(UIR.parse(line))
 
         t2 = time.time()
-        log.debug("fixed data parsed in %.3fs", t2 - t1)
+        ctx.log.debug("fixed data parsed in %.3fs", t2 - t1)
         return cls(countries, airports, firs, uirs)
 
     def find_airport_by_ctrl(self, ctrl: "Controller") -> Optional[Airport]:
@@ -251,7 +248,7 @@ class Data:
         return None
 
     def build_indexes(self):
-        log.debug("building fixed data indexes")
+        ctx.log.debug("building fixed data indexes")
         t1 = time.time()
 
         self._country_idx = {}
@@ -282,7 +279,7 @@ class Data:
                 self._uir_fir_idx[fir_id] = i
 
         t2 = time.time()
-        log.debug("fixed data indexes built in %.3fs", t2 - t1)
+        ctx.log.debug("fixed data indexes built in %.3fs", t2 - t1)
 
 
 _data: Optional[Data] = None

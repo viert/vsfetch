@@ -5,11 +5,9 @@ from datetime import datetime
 from dateutil.parser import parse
 from pydantic import BaseModel, Field
 from pydantic.functional_validators import BeforeValidator
-from vsfetch.log import log
-from vsfetch.config import get_config
 from vsfetch.fixed import Airport as FixedAirport, FIR as FixedFIR, get_data as get_fixed_data
 from vsfetch.ourairports import find_airport_runways
-
+from .ctx import ctx
 
 VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json"
 
@@ -208,48 +206,45 @@ class VersionedObject(BaseModel):
 
 
 def store_track(pilots: List[Pilot], version: int):
-    cfg = get_config()
     t1 = time.time()
     objects = [pilot.track_object(version).model_dump() for pilot in pilots]
     req = {"data": objects}
-    url = f"{cfg.tracked.base_url}/api/v1/tracks/"
-    log.debug(f"storing track data to %s", url)
-    resp = requests.post(url, json=req, timeout=cfg.tracked.timeout)
+    url = f"{ctx.cfg.tracked.base_url}/api/v1/tracks/"
+    ctx.log.debug(f"storing track data to %s", url)
+    resp = requests.post(url, json=req, timeout=ctx.cfg.tracked.timeout)
     if resp.status_code >= 300:
-        log.error(f"unsuccessful status code, response is {resp.text}")
+        ctx.log.error(f"unsuccessful status code, response is {resp.text}")
     data = resp.json()
     t2 = time.time()
-    log.info("track data stored in %.3fs status: %s", t2-t1, data["status"])
+    ctx.log.info("track data stored in %.3fs status: %s", t2-t1, data["status"])
 
 
 def store_pilots(pilots: List[Pilot], version: int):
-    cfg = get_config()
     t1 = time.time()
     object_map = {
         f"pilot:{pilot.callsign}": pilot.versioned_object(version).model_dump(exclude_none=True) for pilot in pilots
     }
     req = {"data": object_map}
-    url = f"{cfg.versioned.base_url}/api/v1/objects/"
-    log.debug(f"storing pilots data to %s", url)
-    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
+    url = f"{ctx.cfg.versioned.base_url}/api/v1/objects/"
+    ctx.log.debug(f"storing pilots data to %s", url)
+    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
     data = resp.json()
     t2 = time.time()
-    log.info("versioned pilots stored in %.3fs status: %s", t2-t1, data["status"])
+    ctx.log.info("versioned pilots stored in %.3fs status: %s", t2-t1, data["status"])
     delete_old_keys("pilot:", set(object_map.keys()), version)
 
 
 def delete_old_keys(prefix: str, new_keys: Set[str], version: int):
-    cfg = get_config()
     t1 = time.time()
-    log.debug("collecting existing keys with prefix \"%s\" from versioned db", prefix)
-    url = f"{cfg.versioned.base_url}/api/v1/keys/?prefix={prefix}"
-    resp = requests.get(url, timeout=cfg.versioned.timeout)
+    ctx.log.debug("collecting existing keys with prefix \"%s\" from versioned db", prefix)
+    url = f"{ctx.cfg.versioned.base_url}/api/v1/keys/?prefix={prefix}"
+    resp = requests.get(url, timeout=ctx.cfg.versioned.timeout)
     data = resp.json()
 
     keys = set(data["keys"])
     keys_to_remove = keys.difference(new_keys)
 
-    log.debug("keys in db %d, number of keys to remove %d", len(keys), len(keys_to_remove))
+    ctx.log.debug("keys in db %d, number of keys to remove %d", len(keys), len(keys_to_remove))
 
     if keys_to_remove:
         req = {
@@ -257,16 +252,14 @@ def delete_old_keys(prefix: str, new_keys: Set[str], version: int):
             "version": version
         }
 
-        url = f"{cfg.versioned.base_url}/api/v1/objects/"
-        resp = requests.delete(url, json=req, timeout=cfg.versioned.timeout)
+        url = f"{ctx.cfg.versioned.base_url}/api/v1/objects/"
+        resp = requests.delete(url, json=req, timeout=ctx.cfg.versioned.timeout)
         data = resp.json()
         t2 = time.time()
-        log.debug(f"%s in %.3fs", data["status"], t2-t1)
+        ctx.log.debug(f"%s in %.3fs", data["status"], t2-t1)
 
 
 def store_controllers(ctrls: List[Controller], atis: List[Controller], version: int):
-    cfg = get_config()
-
     t1 = time.time()
     airports: Dict[str, Airport] = {}
     firs: Dict[str, FIR] = {}
@@ -276,7 +269,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         if 2 <= ctrl.facility <= 5:
             f_arpt = get_fixed_data().find_airport_by_ctrl(ctrl)
             if f_arpt is None:
-                log.debug("can't find airport by callsign %s", ctrl.callsign)
+                ctx.log.debug("can't find airport by callsign %s", ctrl.callsign)
                 continue
 
             arpt = airports.get(f_arpt.icao, Airport(**f_arpt.model_dump()))
@@ -309,7 +302,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         elif ctrl.facility == 6:
             f_fir = get_fixed_data().find_fir_by_ctrl(ctrl)
             if f_fir is None:
-                log.debug("can't find FIR by callsign %s", ctrl.callsign)
+                ctx.log.debug("can't find FIR by callsign %s", ctrl.callsign)
                 continue
 
             fir = firs.get(f_fir.icao, FIR(**f_fir.model_dump()))
@@ -336,7 +329,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         ctrl.facility = 1
         f_arpt = get_fixed_data().find_airport_by_ctrl(ctrl)
         if f_arpt is None:
-            log.debug("can't find airport by callsign %s", ctrl.callsign)
+            ctx.log.debug("can't find airport by callsign %s", ctrl.callsign)
             continue
 
         arpt = airports.get(f_arpt.icao, Airport(**f_arpt.model_dump()))
@@ -364,28 +357,28 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
         for ctrl in pure_ctrls.values()
     }
 
-    url = f"{cfg.versioned.base_url}/api/v1/objects/"
+    url = f"{ctx.cfg.versioned.base_url}/api/v1/objects/"
 
     req = {"data": airport_map}
-    log.debug("storing airport data to %s", url)
-    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
+    ctx.log.debug("storing airport data to %s", url)
+    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
     airport_data = resp.json()
 
     req = {"data": fir_map}
-    log.debug("storing fir data to %s", url)
-    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
+    ctx.log.debug("storing fir data to %s", url)
+    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
     fir_data = resp.json()
 
     req = {"data": pure_ctrl_map}
-    log.debug("storing pure controllers to %s", url)
-    resp = requests.post(url, json=req, timeout=cfg.versioned.timeout)
+    ctx.log.debug("storing pure controllers to %s", url)
+    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
     ctrl_data = resp.json()
     t2 = time.time()
 
-    log.info("versioned airports stored in %.3fs", t2-t1)
-    log.debug("airport store status: %s", airport_data["status"])
-    log.debug("fir store status: %s", fir_data["status"])
-    log.debug("pure ctrl store status: %s", ctrl_data["status"])
+    ctx.log.info("versioned airports stored in %.3fs", t2-t1)
+    ctx.log.debug("airport store status: %s", airport_data["status"])
+    ctx.log.debug("fir store status: %s", fir_data["status"])
+    ctx.log.debug("pure ctrl store status: %s", ctrl_data["status"])
 
     delete_old_keys("airport:", set(airport_map.keys()), version)
     delete_old_keys("fir:", set(fir_map.keys()), version)
@@ -393,14 +386,14 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
 
 def process(prev_version: Optional[int] = None) -> int:
-    log.debug("fetching data from %s", VATSIM_DATA_URL)
+    ctx.log.debug("fetching data from %s", VATSIM_DATA_URL)
 
-    resp = requests.get(VATSIM_DATA_URL, timeout=get_config().external.timeout)
+    resp = requests.get(VATSIM_DATA_URL, timeout=ctx.cfg.external.timeout)
     data = resp.json()
 
     version = parse_vatsim_date_str_ts_ms(data["general"]["update_timestamp"])
     if prev_version and version <= prev_version:
-        log.debug("previous data version is the same or fresher, skipping")
+        ctx.log.debug("previous data version is the same or fresher, skipping")
         return prev_version
 
     pilots = [Pilot(**pilot) for pilot in data["pilots"]]
@@ -422,14 +415,14 @@ def loop():
         try:
             new_version = process(version)
         except Exception as e:
-            log.error(f"error processing version {version}: {e}, sleeping for 10 seconds")
+            ctx.log.error(f"error processing version {version}: {e}, sleeping for 10 seconds")
             time.sleep(10)
             continue
 
         if new_version == version:
-            log.debug("no new data, sleeping for 3 seconds")
+            ctx.log.debug("no new data, sleeping for 3 seconds")
             time.sleep(3)
         else:
             version = new_version
-            log.debug("data processed, sleeping for 10 seconds")
+            ctx.log.debug("data processed, sleeping for 10 seconds")
             time.sleep(10)

@@ -1,6 +1,6 @@
 from argparse import ArgumentParser
 from vsfetch.dynamic import loop
-from vsfetch.config import init_config
+from vsfetch.ctx import ctx
 
 
 def run():
@@ -11,5 +11,5 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("-c", "--config", default="/etc/vsfetch/vsfetch.toml", help="config file to use")
     args = parser.parse_args()
-    init_config(args.config)
+    ctx.set_config_filename(args.config)
     run()
