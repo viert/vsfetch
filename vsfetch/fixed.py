@@ -1,12 +1,13 @@
 import time
-import requests
+import aiohttp
 import shapely
 from typing import Self, Optional, List, Dict, DefaultDict, Annotated, TYPE_CHECKING, Any
 from collections import defaultdict
 from pydantic import BaseModel
 from pydantic.functional_validators import BeforeValidator
 from shapely.geometry import shape
-from .ctx import ctx
+from vsfetch.ctx import ctx
+from vsfetch.http import get_json
 if TYPE_CHECKING:
     from .dynamic import Controller
 
@@ -33,13 +34,12 @@ class Boundaries(BaseModel):
 _boundaries: Optional[Dict[str, Boundaries]] = None
 
 
-def boundaries() -> Dict[str, Boundaries]:
+async def boundaries() -> Dict[str, Boundaries]:
     global _boundaries
     if _boundaries is None:
         ctx.log.debug("loading and parsing boundaries from %s", BOUNDARIES_DATA_URL)
         t1 = time.time()
-        resp = requests.get(BOUNDARIES_DATA_URL, timeout=ctx.cfg.external.timeout)
-        data = resp.json()
+        data = await get_json(BOUNDARIES_DATA_URL)
         bounds = {}
         for feature in data["features"]:
             icao = feature["properties"]["id"]
@@ -69,7 +69,7 @@ class Country(BaseModel):
     custom_control_name: Annotated[Optional[str], BeforeValidator(lambda x: x if x else None)]
 
     @classmethod
-    def parse(cls, line: str) -> Self:
+    async def parse(cls, line: str) -> Self:
         tokens = line.strip().split("|")
         if len(tokens) != 3:
             raise ParseError(f"invalid country line: {line}")
@@ -90,7 +90,7 @@ class Airport(BaseModel):
     is_pseudo: Annotated[bool, BeforeValidator(lambda x: x == "1")]
 
     @classmethod
-    def parse(cls, line: str) -> Self:
+    async def parse(cls, line: str) -> Self:
         tokens = line.strip().split("|")
         if len(tokens) != 7:
             raise ParseError(f"invalid airport line: {line}")
@@ -112,21 +112,22 @@ class FIR(BaseModel):
     boundaries: Optional[Boundaries] = None
 
     @classmethod
-    def parse(cls, line: str) -> Self:
+    async def parse(cls, line: str) -> Self:
         tokens = line.strip().split("|")
         if len(tokens) != 4:
             raise ParseError(f"invalid FIR line: {line}")
 
-        bds = boundaries().get(tokens[3], boundaries().get(tokens[0]))
+        bds = await boundaries()
+        res = bds.get(tokens[3], bds.get(tokens[0]))
 
-        if bds is None:
+        if res is None:
             ctx.log.error(f"can't find boundaries for fir {tokens[0]} {tokens[2]}")
 
         return cls(
             icao=tokens[0],
             name=tokens[1],
             prefix=tokens[2],
-            boundaries=bds
+            boundaries=res
         )
 
 
@@ -136,7 +137,7 @@ class UIR(BaseModel):
     fir_ids: Annotated[List[str], BeforeValidator(lambda x: x.strip().split(","))]
 
     @classmethod
-    def parse(cls, line: str) -> Self:
+    async def parse(cls, line: str) -> Self:
         tokens = line.strip().split("|")
         if len(tokens) != 3:
             raise ParseError(f"invalid UIR line: {line}")
@@ -176,14 +177,15 @@ class Data:
         self.build_indexes()
 
     @classmethod
-    def load(cls) -> Self:
+    async def load(cls) -> Self:
         ctx.log.debug("loading fixed data from %s", FIXED_DATA_URL)
-        resp = requests.get(FIXED_DATA_URL, timeout=ctx.cfg.external.timeout)
-        data = resp.text
-        return cls.parse(data)
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(FIXED_DATA_URL, timeout=ctx.cfg.external.timeout) as resp:
+                data = await resp.text()
+                return await cls.parse(data)
 
     @classmethod
-    def parse(cls, text: str) -> Self:
+    async def parse(cls, text: str) -> Self:
         t1 = time.time()
         ctx.log.debug("parsing fixed data")
         c_section = None
@@ -204,13 +206,13 @@ class Data:
 
             match c_section:
                 case "countries":
-                    countries.append(Country.parse(line))
+                    countries.append(await Country.parse(line))
                 case "airports":
-                    airports.append(Airport.parse(line))
+                    airports.append(await Airport.parse(line))
                 case "firs":
-                    firs.append(FIR.parse(line))
+                    firs.append(await FIR.parse(line))
                 case "uirs":
-                    uirs.append(UIR.parse(line))
+                    uirs.append(await UIR.parse(line))
 
         t2 = time.time()
         ctx.log.debug("fixed data parsed in %.3fs", t2 - t1)
@@ -285,13 +287,13 @@ class Data:
 _data: Optional[Data] = None
 
 
-def reload():
+async def reload():
     global _data
-    _data = Data.load()
+    _data = await Data.load()
 
 
-def get_data() -> Data:
+async def get_data() -> Data:
     global _data
     if _data is None:
-        reload()
+        await reload()
     return _data

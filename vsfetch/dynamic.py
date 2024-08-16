@@ -1,5 +1,5 @@
+import asyncio
 import time
-import requests
 from typing import Optional, List, Annotated, Dict, Set, TypeVar
 from datetime import datetime
 from dateutil.parser import parse
@@ -7,7 +7,8 @@ from pydantic import BaseModel, Field
 from pydantic.functional_validators import BeforeValidator
 from vsfetch.fixed import Airport as FixedAirport, FIR as FixedFIR, get_data as get_fixed_data
 from vsfetch.ourairports import find_airport_runways
-from .ctx import ctx
+from vsfetch.ctx import ctx
+from vsfetch.http import post_json, get_json, delete_json
 
 VATSIM_DATA_URL = "https://data.vatsim.net/v3/vatsim-data.json"
 
@@ -205,21 +206,22 @@ class VersionedObject(BaseModel):
     version: int
 
 
-def store_track(pilots: List[Pilot], version: int):
+async def store_track(pilots: List[Pilot], version: int):
     t1 = time.time()
     objects = [pilot.track_object(version).model_dump() for pilot in pilots]
     req = {"data": objects}
     url = f"{ctx.cfg.tracked.base_url}/api/v1/tracks/"
     ctx.log.debug(f"storing track data to %s", url)
-    resp = requests.post(url, json=req, timeout=ctx.cfg.tracked.timeout)
-    if resp.status_code >= 300:
-        ctx.log.error(f"unsuccessful status code, response is {resp.text}")
-    data = resp.json()
+    try:
+        data = await post_json(url, req, timeout=ctx.cfg.tracked.timeout)
+    except Exception as e:
+        ctx.log.error(f"{e}")
+        return
     t2 = time.time()
     ctx.log.info("track data stored in %.3fs status: %s", t2-t1, data["status"])
 
 
-def store_pilots(pilots: List[Pilot], version: int):
+async def store_pilots(pilots: List[Pilot], version: int):
     t1 = time.time()
     object_map = {
         f"pilot:{pilot.callsign}": pilot.versioned_object(version).model_dump(exclude_none=True) for pilot in pilots
@@ -227,19 +229,22 @@ def store_pilots(pilots: List[Pilot], version: int):
     req = {"data": object_map}
     url = f"{ctx.cfg.versioned.base_url}/api/v1/objects/"
     ctx.log.debug(f"storing pilots data to %s", url)
-    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
-    data = resp.json()
+    try:
+        data = await post_json(url, req, timeout=ctx.cfg.versioned.timeout)
+    except Exception as e:
+        ctx.log.error(f"{e}")
+        return
+
     t2 = time.time()
     ctx.log.info("versioned pilots stored in %.3fs status: %s", t2-t1, data["status"])
-    delete_old_keys("pilot:", set(object_map.keys()), version)
+    await delete_old_keys("pilot:", set(object_map.keys()), version)
 
 
-def delete_old_keys(prefix: str, new_keys: Set[str], version: int):
+async def delete_old_keys(prefix: str, new_keys: Set[str], version: int):
     t1 = time.time()
     ctx.log.debug("collecting existing keys with prefix \"%s\" from versioned db", prefix)
     url = f"{ctx.cfg.versioned.base_url}/api/v1/keys/?prefix={prefix}"
-    resp = requests.get(url, timeout=ctx.cfg.versioned.timeout)
-    data = resp.json()
+    data = await get_json(url, timeout=ctx.cfg.versioned.timeout)
 
     keys = set(data["keys"])
     keys_to_remove = keys.difference(new_keys)
@@ -253,13 +258,12 @@ def delete_old_keys(prefix: str, new_keys: Set[str], version: int):
         }
 
         url = f"{ctx.cfg.versioned.base_url}/api/v1/objects/"
-        resp = requests.delete(url, json=req, timeout=ctx.cfg.versioned.timeout)
-        data = resp.json()
+        data = await delete_json(url, req, timeout=ctx.cfg.versioned.timeout)
         t2 = time.time()
         ctx.log.debug(f"%s in %.3fs", data["status"], t2-t1)
 
 
-def store_controllers(ctrls: List[Controller], atis: List[Controller], version: int):
+async def store_controllers(ctrls: List[Controller], atis: List[Controller], version: int):
     t1 = time.time()
     airports: Dict[str, Airport] = {}
     firs: Dict[str, FIR] = {}
@@ -267,13 +271,13 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
     for ctrl in ctrls:
         if 2 <= ctrl.facility <= 5:
-            f_arpt = get_fixed_data().find_airport_by_ctrl(ctrl)
+            f_arpt = (await get_fixed_data()).find_airport_by_ctrl(ctrl)
             if f_arpt is None:
                 ctx.log.debug("can't find airport by callsign %s", ctrl.callsign)
                 continue
 
             arpt = airports.get(f_arpt.icao, Airport(**f_arpt.model_dump()))
-            runways = find_airport_runways(arpt.icao)
+            runways = await find_airport_runways(arpt.icao)
             if runways:
                 runways = {k: Runway(**rwy.model_dump()) for k, rwy in runways.items()}
                 arpt.runways = runways
@@ -300,7 +304,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
             pure_ctrls[ctrl.callsign] = StoredController(**stored_ctrl)
 
         elif ctrl.facility == 6:
-            f_fir = get_fixed_data().find_fir_by_ctrl(ctrl)
+            f_fir = (await get_fixed_data()).find_fir_by_ctrl(ctrl)
             if f_fir is None:
                 ctx.log.debug("can't find FIR by callsign %s", ctrl.callsign)
                 continue
@@ -308,7 +312,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
             fir = firs.get(f_fir.icao, FIR(**f_fir.model_dump()))
             control_name = "Radar"
 
-            country = get_fixed_data().find_country_by_icao(fir.icao)
+            country = (await get_fixed_data()).find_country_by_icao(fir.icao)
             if country:
                 if country.custom_control_name:
                     control_name = country.custom_control_name
@@ -327,7 +331,7 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
     for ctrl in atis:
         ctrl.facility = 1
-        f_arpt = get_fixed_data().find_airport_by_ctrl(ctrl)
+        f_arpt = (await get_fixed_data()).find_airport_by_ctrl(ctrl)
         if f_arpt is None:
             ctx.log.debug("can't find airport by callsign %s", ctrl.callsign)
             continue
@@ -361,18 +365,15 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
 
     req = {"data": airport_map}
     ctx.log.debug("storing airport data to %s", url)
-    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
-    airport_data = resp.json()
+    airport_data = await post_json(url, req, timeout=ctx.cfg.versioned.timeout)
 
     req = {"data": fir_map}
     ctx.log.debug("storing fir data to %s", url)
-    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
-    fir_data = resp.json()
+    fir_data = await post_json(url, req, timeout=ctx.cfg.versioned.timeout)
 
     req = {"data": pure_ctrl_map}
     ctx.log.debug("storing pure controllers to %s", url)
-    resp = requests.post(url, json=req, timeout=ctx.cfg.versioned.timeout)
-    ctrl_data = resp.json()
+    ctrl_data = await post_json(url, req, timeout=ctx.cfg.versioned.timeout)
     t2 = time.time()
 
     ctx.log.info("versioned airports stored in %.3fs", t2-t1)
@@ -380,16 +381,14 @@ def store_controllers(ctrls: List[Controller], atis: List[Controller], version: 
     ctx.log.debug("fir store status: %s", fir_data["status"])
     ctx.log.debug("pure ctrl store status: %s", ctrl_data["status"])
 
-    delete_old_keys("airport:", set(airport_map.keys()), version)
-    delete_old_keys("fir:", set(fir_map.keys()), version)
-    delete_old_keys("ctrl:", set(pure_ctrl_map.keys()), version)
+    await delete_old_keys("airport:", set(airport_map.keys()), version)
+    await delete_old_keys("fir:", set(fir_map.keys()), version)
+    await delete_old_keys("ctrl:", set(pure_ctrl_map.keys()), version)
 
 
-def process(prev_version: Optional[int] = None) -> int:
+async def process(prev_version: Optional[int] = None) -> int:
     ctx.log.debug("fetching data from %s", VATSIM_DATA_URL)
-
-    resp = requests.get(VATSIM_DATA_URL, timeout=ctx.cfg.external.timeout)
-    data = resp.json()
+    data = await get_json(VATSIM_DATA_URL)
 
     version = parse_vatsim_date_str_ts_ms(data["general"]["update_timestamp"])
     if prev_version and version <= prev_version:
@@ -398,31 +397,31 @@ def process(prev_version: Optional[int] = None) -> int:
 
     pilots = [Pilot(**pilot) for pilot in data["pilots"]]
 
-    store_track(pilots, version)
-    store_pilots(pilots, version)
+    await store_track(pilots, version)
+    await store_pilots(pilots, version)
 
     ctrls = [Controller(**ctrl) for ctrl in data["controllers"]]
     atis = [Controller(**ctrl) for ctrl in data["atis"]]
 
-    store_controllers(ctrls, atis, version)
+    await store_controllers(ctrls, atis, version)
 
     return version
 
 
-def loop():
+async def loop():
     version = None
     while True:
         try:
-            new_version = process(version)
+            new_version = await process(version)
         except Exception as e:
             ctx.log.error(f"error processing version {version}: {e}, sleeping for 10 seconds")
-            time.sleep(10)
+            await asyncio.sleep(10)
             continue
 
         if new_version == version:
             ctx.log.debug("no new data, sleeping for 3 seconds")
-            time.sleep(3)
+            await asyncio.sleep(3)
         else:
             version = new_version
             ctx.log.debug("data processed, sleeping for 10 seconds")
-            time.sleep(10)
+            await asyncio.sleep(10)

@@ -1,7 +1,6 @@
-import requests
 from typing import Optional, Dict
 from pydantic import BaseModel
-from vsfetch.ctx import ctx
+from vsfetch.http import get_json
 
 
 RUNWAY_MAP_URL = "https://raw.githubusercontent.com/viert/ourairports-json/main/output/runway_split_map.json"
@@ -26,24 +25,24 @@ class Runway(BaseModel):
 _data: Optional[Dict[str, Dict[str, Runway]]] = None
 
 
-def reload():
+async def reload():
     global _data
-    resp = requests.get(RUNWAY_MAP_URL, timeout=ctx.cfg.external.timeout)
+    data = await get_json(RUNWAY_MAP_URL)
     runway_map = {}
-    for key, r_map in resp.json().items():
+    for key, r_map in data.items():
         runway_map[key] = {}
         for ident, rwy in r_map.items():
             runway_map[key][ident] = Runway(**rwy)
     _data = runway_map
 
 
-def get_data() -> Dict[str, Dict[str, Runway]]:
+async def get_data() -> Dict[str, Dict[str, Runway]]:
     global _data
     if _data is None:
-        reload()
+        await reload()
     return _data
 
 
-def find_airport_runways(icao: str) -> Optional[Dict[str, Runway]]:
-    data = get_data()
+async def find_airport_runways(icao: str) -> Optional[Dict[str, Runway]]:
+    data = await get_data()
     return data.get(icao)
